@@ -4,7 +4,7 @@ A snapshot of production AI observability as it stood in Q2 2026: what the three
 
 The editorial position is this: the observability gap created by AI workloads is structural rather than configurational, and the tools exist to close it, but the gap between having those tools and using them correctly is still large enough that most teams are discovering it in production rather than at design time.
 
-[Video overview of the project](VIDEO_URL_PLACEHOLDER)
+[Video overview of the project](https://youtu.be/gwhjEXGA1Is)
 
 ## Why "Q2 2026"
 
