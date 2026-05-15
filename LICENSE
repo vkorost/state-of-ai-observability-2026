@@ -1,0 +1,88 @@
+THE STATE OF AI OBSERVABILITY: Q2 2026
+
+Copyright (c) 2026 V. Korostyshevskiy. All rights reserved.
+
+
+================================================================================
+LICENSES
+================================================================================
+
+This work is published under two licenses:
+
+PROSE: Creative Commons Attribution 4.0 International (CC BY 4.0).
+You are free to share and adapt the prose material for any purpose,
+including commercial use, provided appropriate credit is given, a
+link to the license is provided, and any changes are indicated.
+Full license text: https://creativecommons.org/licenses/by/4.0/
+
+CODE SAMPLES: MIT License. Permission is hereby granted, free of
+charge, to any person obtaining a copy of any code sample in this
+book, to deal in the code without restriction, including without
+limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and to permit persons to whom the code is
+furnished to do so, subject to the following conditions: the above
+copyright notice and this permission notice shall be included in
+all copies or substantial portions of the code.
+
+
+================================================================================
+DISCLAIMERS
+================================================================================
+
+NO WARRANTY. This work is provided "AS IS" and without warranty of any
+kind, express or implied. The author makes no representations as to the
+accuracy, completeness, currency, fitness for any purpose, or non-
+infringement of its contents. The corpus on which the book is based had
+a fixed cutoff in Q2 2026 and nothing in this work has been updated
+since. The reader assumes all responsibility for verifying any claim
+before relying on it.
+
+NOT PROFESSIONAL ADVICE. Nothing in this work constitutes engineering,
+architectural, procurement, financial, or any other form of professional
+advice. The book surveys observability practices, product capabilities,
+and production incidents and is not authoritative on any subject it
+covers. Readers seeking guidance on any subject covered should consult
+qualified professionals in the relevant field.
+
+NO VENDOR SPONSORSHIP. This book was produced independently. No portion
+of its content was commissioned, reviewed, or approved by Datadog, Inc.,
+Anthropic, OpenAI, or any other company whose products are discussed.
+Datadog is a registered trademark of Datadog, Inc. All product names
+are the property of their respective holders and are used here for
+identification purposes only.
+
+VERIFICATION-DATE CONVENTION. Factual claims about product features,
+billing models, API coverage, and competitive capabilities are dated
+in the text with the notation "(per [source], Q[N] 202[X])." Readers
+consulting this book after its Q2 2026 baseline date should verify
+time-sensitive claims against current vendor documentation before
+relying on them for engineering or procurement decisions.
+
+AI-ASSISTED AUTHORSHIP. The chapters in this book were drafted by
+Claude, an artificial intelligence language model produced by
+Anthropic, PBC, working against a research corpus under detailed
+instructions from the author. The author selected the sources,
+designed the chapter structure, set the editorial framing, and made
+all decisions about what to include and exclude. The AI performed the
+drafting, cross-referencing, and citation against the corpus. No
+fact-checking outside the corpus was performed. Verifiability is
+bounded by the corpus. Readers who object to AI-assisted writing on
+principle are advised that this work is unsuitable for them.
+
+LIMITATION OF LIABILITY. In no event shall the author, or any party
+associated with the production or distribution of this work, be liable
+for any direct, indirect, incidental, consequential, special,
+exemplary, or punitive damages arising from access to, reading of,
+reliance on, or discussion of this work, even if advised of the
+possibility of such damages. Reading is at the reader's own risk.
+
+FORWARD-LOOKING STATEMENTS. Where the book describes an active
+technical debate, the state of a product, or the position of a named
+researcher, the description reflects the corpus and the moment of
+writing in Q2 2026. Positions, products, and capabilities may have
+changed since. The author does not warrant that any such description
+remains current.
+
+SEVERABILITY. If any provision of this notice is held to be invalid or
+unenforceable, the remaining provisions shall continue in full force
+and effect.
