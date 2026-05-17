@@ -53,8 +53,9 @@ Chapters are designed to be read sequentially but can be consulted individually.
 - `book/chapters/`: the 12 chapters as individual Markdown files, plus the preface.
 - `book/CONCEPTS.md`: the named concepts introduced in each chapter.
 - `book/BIBLIOGRAPHY.md`: further reading organized by rate of change (stable, medium-cadence, fast-moving).
+- `reports/`: the 13 deep research reports (synthesized by Claude, Gemini, and Perplexity) that formed the analytical corpus for the book.
 
-The raw subtitles, the research reports, the Datadog documentation vault, the assembly pipeline instructions, and the working files (style constraints, registry, reviewer reports) are not published. Only the book and this description are here.
+The raw subtitles, the Datadog documentation vault, the assembly pipeline instructions, and the working files (style constraints, registry, reviewer reports) are not published.
 
 ## Coverage cutoff
 
