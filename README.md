@@ -1,6 +1,6 @@
 # The State of AI Observability: Q2 2026
 
-A snapshot of production AI observability as it stood in Q2 2026: what the three-pillar model does not see, what breaks when you trace non-deterministic systems, how much it costs, and what happens when the monitoring system is itself an AI. 12 chapters drawn from Datadog documentation, DASH talk recordings, independent cost analyses, incident retrospectives, and OpenTelemetry specifications.
+A snapshot of production AI observability as it stood in Q2 2026: what the three-pillar model does not see, what breaks when you trace non-deterministic systems, how much it costs, and what happens when the monitoring system is itself an AI. 12 chapters, 96,000 words, 171 endnotes drawn from Datadog documentation, DASH talk recordings, independent cost analyses, incident retrospectives, and OpenTelemetry specifications.
 
 The editorial position is this: the observability gap created by AI workloads is structural rather than configurational, and the tools exist to close it, but the gap between having those tools and using them correctly is still large enough that most teams are discovering it in production rather than at design time.
 
@@ -24,12 +24,12 @@ The result is a corpus spanning:
 
 | Source | Type | Items |
 |--------|------|-------|
-| DASH talks (2025-2026) | subtitles | 24 AI-relevant sessions |
-| Research reports | markdown/PDF | 15 reports |
-| Datadog documentation | site2vault | Full docs site |
-| MCP protocol specification | site2vault | Full spec site |
+| [DASH talks](https://www.youtube.com/@DatadogHQ) (2025-2026) | subtitles | 24 AI-relevant sessions |
+| [Research reports](./reports/) | markdown/PDF | 15 reports |
+| [Datadog documentation](https://docs.datadoghq.com/) | site2vault | Full docs site |
+| [MCP protocol specification](https://modelcontextprotocol.io/) | site2vault | Full spec site |
 
-The book itself was assembled with Claude using techniques partially described in [weekend-diy-book](https://github.com/vkorost/weekend-diy-book): style condensation, per-chapter assembly under explicit instructions, dedup, review, edit, revision, and final DOCX/PDF/EPUB generation, orchestrated as a multi-phase pipeline with 18 sequential sub-agents.
+The book itself was assembled with Claude Code using techniques described in the [weekend-diy-book](https://github.com/vkorost/weekend-diy-book) project: style condensation, anti-repetition registry enforcement, per-chapter writing with fact-tracing against the source corpus, dedup, two-pass review, editorial revision, and final PDF/EPUB generation, orchestrated as a multi-phase pipeline with 18+ sequential sub-agents. Writer agents ran on Claude Opus 4.6; all other agents ran on Claude Sonnet 4. The "How This Book Was Written" chapter describes the anti-hallucination architecture in detail.
 
 ## The Five Parts
 
@@ -41,7 +41,7 @@ The book is organized around five parts, each occupying a distinct analytical la
 - **Part IV: Datadog in 2025 to 2026** (Chs 7-10): Datadog's specific AI surface, instrumentation in practice, cost engineering, and the competitive landscape. The most time-sensitive chapters.
 - **Part V: What's Next** (Chs 11-12): autonomous monitoring and the governance problem, and the Lindy filter applied to the book's own contents.
 
-Each chapter introduces one to three named concepts as cognitive handles: **The Cardinality Cliff**, **The Eval/Ops Split**, **The Span Topology Problem**, **The Runaway Cost Loop**, **The Shadow Agent Problem**, **The Lindy Filter**, and others. These are not conclusions; they name the point where the engineering discipline forks and the principled decision must be made.
+Each chapter introduces one to three named concepts as cognitive handles: **The Cardinality Cliff**, **The Eval/Ops Split**, **The Span Topology Problem**, **The Six Incident Categories**, **The MCP Telemetry Bridge**, **The Lindy Filter**, and others. These are not conclusions; they name the point where the engineering discipline forks and the principled decision must be made.
 
 Chapters are designed to be read sequentially but can be consulted individually. `CONCEPTS.md` collects the named concepts introduced in each chapter.
 
@@ -50,10 +50,9 @@ Chapters are designed to be read sequentially but can be consulted individually.
 - `README.md`: this file.
 - [`book/state-of-ai-observability-2026.pdf`](./book/state-of-ai-observability-2026.pdf): PDF for offline reading and print.
 - [`book/state-of-ai-observability-2026.epub`](./book/state-of-ai-observability-2026.epub): EPUB for e-readers.
-- `book/chapters/`: the 12 chapters as individual Markdown files, plus the preface.
-- `book/CONCEPTS.md`: the named concepts introduced in each chapter.
-- `book/BIBLIOGRAPHY.md`: further reading organized by rate of change (stable, medium-cadence, fast-moving).
-- `reports/`: the 13 deep research reports (synthesized by Claude, Gemini, and Perplexity) that formed the analytical corpus for the book.
+- [`book/chapters/`](./book/chapters/): the 12 chapters as individual Markdown files, plus front matter, "How This Book Was Written," and Appendix G (endnotes).
+- [`book/CONCEPTS.md`](./book/CONCEPTS.md): the named concepts introduced in each chapter.
+- [`book/BIBLIOGRAPHY.md`](./book/BIBLIOGRAPHY.md): further reading organized by rate of change (stable, medium-cadence, fast-moving).
 
 The raw subtitles, the Datadog documentation vault, the assembly pipeline instructions, and the working files (style constraints, registry, reviewer reports) are not published.
 
@@ -63,7 +62,7 @@ Documentation, DASH talks, and research reports consulted through Q2 2026 are re
 
 ## AI assistance, scope of
 
-Claude was used for research synthesis, prose generation in a defined voice (Cal Newport spine, Michael Lopp named-pattern discipline), per-chapter assembly under explicit instructions with anti-repetition registry enforcement, and generating the index. The multi-agent pipeline included a Style Agent, Registry Agent, 12 Writer Agents, Dedup Agent, Registry Compliance Agent, two Reviewer Agents, and an Editor Agent, all running sequentially. Editorial decisions about which positions to include were mine. I did not do any independent fact-checking or source verification beyond what is already in the corpus.
+Claude was used for research synthesis, prose generation in a defined voice (calibrated-reference register: Gladwell's curatorial architecture for the spine, Lopp's sentence rhythm for texture, governed by a durability firewall that keeps an assertive register for durable engineering principles and a flat, dated register for perishable product claims), per-chapter assembly under explicit instructions with anti-repetition registry enforcement, and fact-tracing every chapter against its source corpus. The multi-agent pipeline ran 18+ sequential sub-agents covering style, grounding, registry, per-chapter writing and fact-tracing, endnote compilation, dedup, two-pass review, editorial revision, and final assembly. Writer agents ran on Claude Opus 4.6; all other agents ran on Claude Sonnet 4. Editorial decisions about which positions to include were mine. The fact-trace architecture is described in the "How This Book Was Written" chapter.
 
 ## What's not in scope
 

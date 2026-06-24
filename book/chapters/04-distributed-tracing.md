@@ -1,0 +1,294 @@
+# Chapter 4: Distributed Tracing in Non-Deterministic Systems
+
+*In this chapter, the analysis examines why distributed tracing, built for request/response trees of bounded depth, breaks structurally under agentic AI workloads. Four failure patterns produce orphaned spans, severed parent-child links, and uninterpretable trace topologies. The chapter introduces the Span Topology Problem as the representational gap that persists even in correctly instrumented systems, traces the current state of OpenTelemetry GenAI semantic conventions as they apply to agentic workflows, and argues that context propagation must be treated as a protocol requirement established before the first span is emitted, not as an instrumentation afterthought retrofitted under incident pressure.*
+
+In February 2025, the on-call engineer at a mid-size logistics company spent four hours trying to reconstruct what had happened to a shipment routing agent that had begun producing inconsistent results. The agent was built on a multi-step orchestration framework: it received a shipment record, decomposed the routing problem into subtasks, called a series of third-party carrier APIs to price options, and then invoked an LLM to synthesize the best route. The system had been running acceptably for six weeks.
+
+The trouble report arrived at 2 a.m. A significant subset of shipment records was being routed to incorrect carriers, with cost overruns on the affected routes averaging 23 percent above optimal. The on-call engineer opened the distributed tracing backend and found something that would be familiar to any team operating an agentic system in production: the trace for the affected session was there, but it was incomplete. The root span had closed. Several carrier API call spans appeared as expected. The LLM synthesis span was present. But the spans corresponding to the tool calls the agent had made during one of its re-planning cycles were missing entirely. Not errored. Not slow. Simply absent, because the async callbacks that dispatched those tool calls had not propagated the trace context forward, and the resulting spans had been recorded as standalone root spans with no connection to the session that generated them.
+
+The engineer found those orphaned spans forty minutes later, after manually searching by timestamp range and cross-referencing the carrier API identifiers in the log store. The root cause turned out to be a configuration error in the carrier pricing module: one endpoint had started returning stale cached prices. The LLM synthesis span showed the model had received the right inputs. The tool call spans, now located in isolation, showed the stale prices arriving from one specific carrier. The full picture was present in the backend. It was present as three disconnected fragments, spread across different trace IDs, requiring a manual join operation that only became possible once the engineer knew which carrier to look for.
+
+Four hours of investigation time for a failure that, in a coherent trace, would have been a five-minute root cause identification. The evidence existed. The structure that would have made the evidence navigable did not.<sup>[1]</sup>
+
+## The Tree That No Longer Holds
+
+What makes that logistics engineer's experience relevant is not the length of the investigation. Long incident investigations are not new. What is new is the specific structural reason the investigation took that long: the tracing model that served the industry well through the microservices era had encountered a class of system for which it was not designed, and the mismatch was not a configuration error. It was a fundamental property of the execution model.
+
+Distributed tracing was built around a mental model that is clean, precise, and extremely useful for the systems it was designed for. A request arrives. A root span opens. Service calls produce child spans. Each child span records its duration, status, and attributes. When the request is resolved, the root span closes. The entire execution is represented as a tree: one root, no cycles, predictable depth, bounded fan-out. This model has served engineers for a decade because it accurately represents how deterministic, request/response systems execute.<sup>[2]</sup>
+
+Agentic AI systems violate every one of those properties. The execution depth is not bounded in advance. The fan-out at any given node is determined at runtime by the agent's reasoning, not by the application's code paths. Cycles are possible and common in reflection-and-retry patterns. Async tool calls dispatch work that may resolve after the parent span has closed. Multi-agent systems route tasks across process boundaries without standardized mechanisms for carrying trace context through the handoff. The mental model of the tree is not wrong. It is simply incomplete as a description of what these systems do.
+
+## The Request/Response Assumption
+
+The W3C Trace Context specification, which defines the `traceparent` and `tracestate` headers that distributed tracing systems use to propagate context across service boundaries, was designed for synchronous or semi-synchronous request/response communication. When service A calls service B over HTTP, service A includes a `traceparent` header in the request. Service B reads that header, creates a child span with the extracted trace ID and parent span ID, and includes the same header in any downstream calls it makes. The result is a chain of spans, all sharing the same trace ID, each correctly positioned as a child of the span that initiated the call.<sup>[2]</sup>
+
+This propagation model works because HTTP requests carry headers. The channel through which the call travels is also the channel through which the trace context travels. The mechanism is transparent to the application code, implemented once in the SDK, and reliable at scale.
+
+Agentic systems communicate through channels that were not designed to carry W3C headers. An agent dispatching work to a tool invokes that tool through a framework-specific mechanism that may be a direct function call, a message placed on an internal queue, an async callback registered with the orchestrator, or a remote procedure call to a separate agent process. None of these channels has a built-in notion of trace context. The function call has no header. The message queue has no standardized metadata field for `traceparent`. The async callback executes in a context where the parent span may have already closed.
+
+The consequence is that each of these dispatch patterns, if not explicitly handled in the framework's instrumentation layer or in the application code, produces an **orphaned span**: a span that records a real operation but carries a trace ID that appears nowhere else in the backend. From the trace store's perspective, it is a root span, a complete, standalone execution record that is not part of any larger trace. From the incident investigator's perspective, it is missing evidence, because the evidence is present but unconnectable to the session that generated it.
+
+The OpenTelemetry GenAI semantic conventions working group has produced a vocabulary for naming agent operations: `invoke_agent` for the internal execution steps within an active agent, `invoke_workflow` as a grouping container span for multi-agent coordination, and `execute_tool` for the client-side or tool-side lifecycle of a tool call.<sup>[3,4]</sup> These operation names are a necessary starting point. They provide the labels that distinguish an agent execution span from an LLM call span from a tool invocation span. But labels do not solve context propagation. A span labeled `execute_tool` with no valid parent span ID is still orphaned. The label tells the backend what happened; the missing parent ID means the backend cannot tell which agent decided to do it.
+
+The following table maps these operation names to their span kind and structural role, as defined by the OpenTelemetry GenAI semantic conventions at v1.37:
+
+| Span Kind | Operation Name | Structural Role |
+| --- | --- | --- |
+| `CLIENT` | `chat`, `generate_content`, `text_completion`, `embeddings` | External RPC boundary to a managed model service |
+| `INTERNAL` | `invoke_agent` | Internal execution steps and reasoning blocks within an active agent |
+| `INTERNAL` | `invoke_workflow` | Grouping container span for multi-agent orchestration |
+| `INTERNAL` / `CLIENT` | `execute_tool` | Client-side or tool-side lifecycle of a tool invocation |
+
+The span kind and operation name together give the backend the vocabulary to classify what it sees. They do not give it the structural linkage to reconstruct why it happened.<sup>[3]</sup>
+
+## Four Failure Patterns in Agentic Traces
+
+Agentic trace fragmentation manifests in four specific structural patterns in production. Each has a distinct cause and a distinct consequence for incident investigation. Understanding them separately matters because each requires a different remediation.
+
+### Async Dispatch and the Orphaned Span
+
+An agent completes a reasoning step and dispatches a tool call asynchronously. The dispatch is implemented as a fire-and-observe operation: the agent places the tool invocation on an internal work queue, continues its own execution, and later reads the tool's result from the queue when the tool completes. The span covering the agent's reasoning step opens before the tool call is dispatched and closes after the tool's result is consumed. But the tool call itself executes in a different execution context, one that was initialized from the queue-worker thread rather than from the agent's span context.
+
+In this pattern, the tool call span is created in the queue-worker thread without access to the agent's active span context. It records the tool name, input arguments, duration, and result. It creates a fresh trace ID. The resulting span lands in the backend as a standalone root span. The agent's span records the tool result arriving as a return value, but carries no span reference to the tool execution that produced it. The two records share a wall-clock time overlap and the same tool name, but nothing in the trace backend connects them automatically.<sup>[1,4]</sup>
+
+Tracing frameworks address this pattern by propagating span context explicitly through the work queue. The standard approach involves serializing the active span context at the point of dispatch, attaching it to the work item as metadata, and deserializing it in the worker thread to construct the child span. Some frameworks implement this automatically. Others require explicit instrumentation. In the logistics system described at the opening of this chapter, the carrier pricing module had been added to the workflow without updating the context propagation configuration, leaving its spans orphaned.
+
+### Post-Response Background Processing
+
+An agent span closes when the agent's primary response is returned to the caller. In a straightforward request/response pattern, this is the correct behavior: the span covers the agent's active processing time, and its closure marks the end of the work. But agentic systems frequently spawn background processing after the primary response has been returned: a cleanup step, a memory consolidation step, a post-interaction evaluation, or an asynchronous notification to another system component.
+
+These post-response operations execute after the parent span has closed. When they create child spans, those child spans reference a parent span ID that no longer exists as an active span in the context. Some tracing backends handle this gracefully by accepting the child span and rendering it as a late-arriving descendant of the closed parent. Others treat the orphaned-parent reference as an error and drop the span. Others store the span but do not render it in the trace visualization, making it discoverable only through raw span search. The resulting trace is inconsistent across backend implementations, which means that teams migrating from one observability platform to another may encounter previously invisible failures becoming visible, or previously visible evidence disappearing.<sup>[1]</sup>
+
+### Cross-Process Context Loss
+
+When a multi-agent system assigns tasks to sub-agents that run in separate processes, the task assignment typically crosses a process boundary through a message format that was designed around task semantics, not around trace context. The message carries a task description, parameters, priority, and a task identifier. It does not carry a `traceparent` field unless the framework was explicitly designed to include one, and most agentic frameworks were not, as of the time this book was written.
+
+The result is a structural break in the trace. The parent agent's span records the task assignment as a child span labeled `execute_tool` or equivalent. The sub-agent process initializes a new trace for the received task. The sub-agent's trace and the parent agent's trace share a semantic relationship, because one was caused by the other, but they share no trace ID. A platform engineer trying to understand the full execution of a user-visible outcome must know to look in both traces, know which task ID connects them, and manually follow the chain across trace IDs.
+
+The OpenTelemetry working group has identified this as an open problem.<sup>[4]</sup> The W3C Trace Context specification defines header-based propagation for HTTP. For message queues and agent-to-agent communication channels, there is no universally adopted equivalent as of Q2 2026. Several frameworks implement proprietary context propagation fields in their message schemas. The absence of a standard means that even when both the parent agent and the sub-agent are instrumented with OpenTelemetry, the trace is broken at the inter-agent boundary unless the team has explicitly implemented context injection and extraction for the specific communication mechanism in use.
+
+### Reflection Loops and Repeated Operation Names
+
+A reflection-and-retry agentic pattern executes a reasoning loop: call the LLM, evaluate the output, decide whether the output is sufficient, and if not, modify the approach and call the LLM again. This pattern is implemented as a programmatic loop in the orchestrator code. From the application developer's perspective, it is a single logical step. From the tracing model's perspective, it is a series of repeated operations that each produce their own spans.
+
+A well-instrumented re-entry loop produces a trace with a clear parent span for the loop, and a series of child spans for each iteration: the first LLM call, the evaluation, the second LLM call, the evaluation, and so on until the loop exits. The parent span covers the duration of the entire loop. Each child span covers one iteration.
+
+In practice, the loop often executes across multiple framework callback layers, each of which may create its own span. The result is a span topology where the parent span is not the loop but one of the framework's internal orchestration spans, and the LLM call spans appear as children of the orchestration span rather than as siblings under a loop span. The trace is technically correct in the sense that every span has a valid parent. But the structure does not map to the developer's mental model of the execution. The loop is not visible as a loop. It is visible as an arbitrarily deep span hierarchy with repeated operation names, which a visualization tool renders as a waterfall rather than as a cycle, losing the conceptual structure that would make the trace interpretable to an engineer unfamiliar with the specific framework's behavior.
+
+## The Span Topology Problem
+
+The four failure patterns above describe ways in which the trace is structurally broken: spans are orphaned, parents are missing, or process boundaries sever the context chain. But there is a deeper problem that affects even well-instrumented agentic systems where the context propagation is working correctly. This problem is about representation, not about correctness.
+
+**The Span Topology Problem.** The structural difficulty of representing agentic execution as a parent-child span hierarchy when agent loops, orphaned spans, async callbacks, and multi-model routing produce trace shapes that span visualization tools cannot render coherently. The Span Topology Problem does not require any instrumentation error. It emerges from the gap between the tree-shaped data model of distributed tracing and the graph-shaped execution model of agentic systems. A trace that is technically complete and correctly linked may still be uninterpretable in practice because its topology does not match the visual primitives of the trace viewer.
+
+To make the problem concrete, consider the trace topology of a correctly instrumented multi-step planner-executor agent, described step by step as a span tree.
+
+The root span opens when the user submits a goal. It is labeled `invoke_workflow` and carries the user's goal text as a span attribute. Under the root span, the planner's first reasoning step opens as a child span labeled `invoke_agent`. Under that agent span, the planner makes an LLM call: a child span labeled `chat`, with the provider, model, and token counts recorded as attributes. The LLM returns a structured decomposition of the goal into three subtasks.
+
+The planner's `invoke_agent` span closes. The executor opens a child span of the root `invoke_workflow` span for each subtask. Because the executor processes the three subtasks in parallel, three child spans with the same parent open simultaneously: each is labeled `invoke_agent` with a subtask description. Each of those three agent spans has its own children: an LLM call to select the appropriate tool, a tool invocation span labeled `execute_tool`, and a second LLM call to interpret the tool's result. The tool invocation spans are `CLIENT`-kind spans, as defined by the OpenTelemetry span kind taxonomy, meaning they represent an external RPC call to a tool service.<sup>[3]</sup>
+
+When the parallel executor spans close, the planner opens another `invoke_agent` span to evaluate whether the goal has been achieved. If not, the planner decides a fourth subtask is required, spawning another executor span with its own tree of children. The workflow span closes when the planner determines the goal is complete.
+
+Rendered as a span-tree schema, the structure looks like this:
+
+```
+invoke_workflow  [root, INTERNAL, session_id=S1]
+  |
+  +,  invoke_agent  [planner-step-1, INTERNAL]
+  |     +,  chat  [LLM call, CLIENT, model=gpt-4o, tokens_in=820, tokens_out=340]
+  |
+  +,  invoke_agent  [executor-subtask-1, INTERNAL]  (parallel)
+  |     +,  chat  [tool selection, CLIENT]
+  |     +,  execute_tool  [tool-A, CLIENT]
+  |     +,  chat  [result interpretation, CLIENT]
+  |
+  +,  invoke_agent  [executor-subtask-2, INTERNAL]  (parallel)
+  |     +,  chat  [tool selection, CLIENT]
+  |     +,  execute_tool  [tool-B, CLIENT]
+  |     +,  chat  [result interpretation, CLIENT]
+  |
+  +,  invoke_agent  [executor-subtask-3, INTERNAL]  (parallel)
+  |     +,  chat  [tool selection, CLIENT]
+  |     +,  execute_tool  [tool-C, CLIENT]
+  |     +,  chat  [result interpretation, CLIENT]
+  |
+  +,  invoke_agent  [planner-evaluation, INTERNAL]
+  |     +,  chat  [goal assessment, CLIENT]
+  |
+  +,  invoke_agent  [executor-subtask-4, INTERNAL]  (re-plan)
+        +,  chat  [tool selection, CLIENT]
+        +,  execute_tool  [tool-D, CLIENT]
+        +,  chat  [result interpretation, CLIENT]
+```
+
+This topology, rendered in a trace visualization tool, produces a waterfall where the three parallel executor spans overlap horizontally, their children stacked beneath them. The planner's evaluation span appears after the executor spans in the timeline. The re-planning and additional executor span appear at the end. The total trace contains approximately forty to seventy spans, depending on the complexity of the goal, spread across four depth levels.<sup>[1,4]</sup>
+
+An engineer reading this trace can reconstruct the execution if they are patient and familiar with the agent's architecture. They can identify which subtask took the longest, which tool call produced an unexpected result, and where the planner's evaluation decision was made. But the visualization does not naturally present the parallel subtasks as parallel. It presents them as items in a waterfall, which implies sequence. The loop structure is not visible. The re-planning decision is visible only if the engineer knows to look for a second planner span after the executor spans have closed.
+
+The Span Topology Problem becomes significantly more severe in multi-agent systems. When the three subtasks in the example above are assigned to three separate sub-agents running in separate processes, and the context propagation is working correctly, the trace still has the structural shape described above. But each sub-agent's spans carry both the trace ID from the parent workflow and the span ID of the task assignment span as their parent. The result is a trace that is semantically a tree but logically a delegation graph: the parent has assigned work to three entities that are conceptually peers, not children, of the assigning span.
+
+Trace visualization tools render this as a parent-child hierarchy, because that is the only rendering model they have. The sub-agents appear visually as nested beneath the task assignment span, suggesting a control relationship that is not actually present in the architecture. An engineer reading the trace might reasonably conclude that the task assignment span must complete before the sub-agents can begin, which is not true. The visualization is misleading without being incorrect.
+
+The OpenTelemetry working group's meta-issue 2664 identifies this problem formally: it categorizes six relational structures for multi-agent interaction, ranging from a single agent with tool calls to hierarchical supervisor-specialist arrangements, and notes that modeling these structures inside the mathematical constraints of distributed tracing, which requires trace topology to form a tree or directed acyclic graph, remains an active area of work.<sup>[4]</sup> The proposals under discussion include new span attributes to encode peer relationships, delegation relationships, and concurrent execution relationships that the parent-child hierarchy cannot express.
+
+## Context Propagation in Practice
+
+The mechanics of context propagation in agentic systems depend on where in the execution model the boundary falls. Three specific boundaries appear in most production agentic architectures, and each has a different propagation challenge.
+
+The first is the synchronous function call boundary. When an agent framework invokes a tool through a direct function call within the same process and thread, context propagation is straightforward: the active span context is available in thread-local storage, and any span created during the tool invocation will automatically inherit the active context as its parent. This is the case that most auto-instrumentation handles correctly. The challenge arises only when the tool call is wrapped in a callback or when the framework creates a new span for its own bookkeeping before calling the tool, inserting an intermediate span into the hierarchy that the developer did not intend.
+
+The second is the asynchronous callback boundary. When a tool call is dispatched asynchronously and the result is consumed via a callback, the callback executes in a different context than the dispatch. Depending on the async runtime (Python's `asyncio`, Node's event loop, Java's `CompletableFuture`), the span context may or may not be propagated to the callback automatically. In Python's `asyncio`, context propagation through `asyncio.create_task` preserves the current context if the instrumentation library uses `contextvars.copy_context()` at the point of task creation. In frameworks that use thread pools rather than coroutines, the context must be explicitly captured at dispatch time and restored at callback time. The auto-instrumentation libraries for Python and Node that Datadog provides handle this propagation for the LLM call itself; propagation through custom tool callbacks is the instrumentation author's responsibility (per Datadog LLM Observability documentation, accessed Q2 2026).<sup>[2,5]</sup>
+
+The following code fragment illustrates the explicit context capture and restoration pattern for an async tool dispatch in Python, using the OpenTelemetry context API. This is the minimal intervention that prevents the async dispatch orphan pattern described above:
+
+```python
+from opentelemetry import context as otel_context
+from opentelemetry import trace
+
+tracer = trace.get_tracer("agent.tools")
+
+def dispatch_tool_async(tool_name, tool_input, work_queue):
+    # Capture the current span context before dispatching
+    ctx = otel_context.get_current()
+
+    async def tool_worker():
+        # Restore the captured context in the worker
+        token = otel_context.attach(ctx)
+        try:
+            with tracer.start_as_current_span(
+                "execute_tool",
+                attributes={"gen_ai.tool.name": tool_name}
+            ) as span:
+                result = await run_tool(tool_name, tool_input)
+                return result
+        finally:
+            otel_context.detach(token)
+
+    work_queue.put(tool_worker)
+```
+
+The critical line is the call to `otel_context.get_current()` before the dispatch and `otel_context.attach(ctx)` inside the worker. Without these two operations, the worker thread creates its span in a fresh, empty context, and the resulting `execute_tool` span becomes an orphaned root. With them, the span correctly parents itself under the agent's active span. The pattern adds four lines of code at the dispatch site. The cost of omitting them is measured in investigation hours.<sup>[5]</sup>
+
+The third boundary is the cross-process message boundary. This is the hardest boundary to handle, because the message format is defined by the application architecture, not by the tracing framework. The standard approach is to serialize the W3C `traceparent` and `tracestate` values into a metadata field on the message, then deserialize them in the receiving process to construct the child span's context. This approach requires both the producer and the consumer to agree on the field name and the serialization format. When the producer and consumer are owned by different teams or written in different languages, achieving that agreement requires cross-team coordination that does not always happen before the system goes to production.
+
+The practical advice from teams that have solved this problem in production is to treat context propagation as a first-class requirement in the interface definition of every agent-to-agent communication contract, not as an instrumentation afterthought. An agent communication protocol that defines the task message schema should include `trace_context` as a required field with a specified format, validated at ingestion. Teams that have not done this find themselves retrofitting context propagation into messages that are already in production, which requires deploying both sides simultaneously to avoid a period where the receiving agent does not recognize the new field.<sup>[1]</sup>
+
+## Session Boundaries and the Missing Hierarchy Tier
+
+One of the structural gaps in the OpenTelemetry GenAI conventions, as of Q2 2026, is the absence of a standardized concept above the trace level for multi-turn conversational sessions. A single user interaction with an AI assistant may span multiple sequential agent invocations: the first invocation handles the user's initial question, the second handles a follow-up, the third handles a clarification request. Each invocation produces its own trace. The traces share a user session, but they do not share a trace ID, because each invocation is a separate request/response cycle.<sup>[4]</sup>
+
+The OpenTelemetry working group has been discussing a three-tier hierarchy to address this: a session identifier above the conversation identifier, with the conversation identifier above the individual span (per the Gemini OTel semantic conventions analysis, citing issue 2883). The proposed structure runs as follows. The `session.id` identifies the entire user engagement across all interactions. The `gen_ai.conversation.id` attribute identifies a specific thread within that session. Individual spans sit within the conversation ID tier.<sup>[4]</sup>
+
+This hierarchy exists in many production implementations as a convention rather than a standard: teams record a session ID as a span attribute or a log field and use it as a correlation key in their observability backend. The absence of a standard means that the correlation is done in the query layer (searching by session ID across multiple traces) rather than in the trace structure itself (navigating from session to conversation to span through the trace tree). The query-layer approach works for retrospective investigation. It does not support alerting or visualization that operates at the session level, because the session is not a first-class object in the telemetry model.
+
+The gap matters operationally because the most important observability questions for conversational AI systems are often session-level questions: how much did this user's session cost in tokens, how many agent invocations did the session require, did the session terminate in a successful outcome or in user abandonment? These questions cannot be answered by inspecting individual traces. They require aggregating across all traces that share a session ID, which is a join operation that the standard trace data model does not support natively.
+
+Several observability platforms, including Datadog with its LLM Observability session tracking, have implemented session-level aggregation as a product-specific layer above the standard trace model (per Datadog LLM Observability documentation, accessed Q2 2026). These implementations use the `gen_ai.conversation.id` attribute or a vendor-specific session ID field to group related traces. The result is functionally useful but architecturally vendor-specific: teams that instrument with a session ID using Datadog's expected field name get session-level visibility in Datadog and lose that visibility if they move to a different backend that uses a different field name or a different data model for session grouping.<sup>[2,5]</sup>
+
+## The Strategy Planning Gap
+
+The OpenTelemetry working group has identified a specific missing layer in the agentic span taxonomy that has direct consequences for how incidents in agentic systems can be investigated: the strategy planning gap (per the Gemini OTel semantic conventions analysis, citing meta-issue 2664).<sup>[4]</sup> This gap sits between a structural task description (what the agent has been asked to accomplish) and the first action span (the first tool call or LLM call the agent makes in pursuit of that task).
+
+In a planner-executor architecture, the planning step is the most diagnostic phase of the agent's execution. The planner receives the goal, reasons about the approach, and decides on a sequence of subtasks and tools. The quality of this reasoning, whether the planner correctly decomposed the goal, whether it identified the right tools, whether it sequenced the subtasks in an order that minimizes unnecessary LLM calls, determines the efficiency and correctness of everything that follows. But the planning step has no standardized span representation. The `invoke_agent` operation name covers the execution of the agent's internal reasoning steps, but it does not specifically identify the planning phase as distinct from the execution phase.
+
+In practice, this means that when an agentic system produces an inefficient or incorrect execution, the trace shows the LLM calls that the planner made, the tool calls that were invoked, and the LLM calls that evaluated results. It does not show, as a first-class span attribute, the plan that was produced: the structured decomposition of the goal that drove all subsequent decisions. The plan may appear as input or output text on one of the LLM spans, but it is not extracted as a structured, queryable artifact that the observability platform can analyze across many sessions.
+
+The consequence for incident investigation is significant. When a class of agentic failures can be attributed to systematically bad planning decisions (the planner consistently selects the wrong tool for a certain type of goal, or the planner decomposition of certain goal types produces redundant subtasks), identifying that pattern requires reading through the LLM call content across many traces. In a mature observability platform, this would be a query: find all sessions where the planner produced a decomposition that resulted in four or more tool calls but only one of them contributed to the final answer. That query requires the plan to be a structured span attribute, not free text in a completion response.
+
+The OpenTelemetry working group's roadmap includes attribute families for `gen_ai.task.*` and `gen_ai.action.*` specifically to address this gap.<sup>[4]</sup> At the time this book was written, those attribute families were proposals under active development, not stable conventions. Teams that need plan-level observability today implement it as custom span attributes on the `invoke_agent` span, recording the structured plan as a JSON-encoded attribute. This approach works within the constraints of the one-megabyte span payload ceiling in Datadog, provided the plan text is not excessively verbose, and provides the queryability that the standard does not yet deliver.
+
+## The GenAI Conventions as the Current Standard
+
+The OpenTelemetry GenAI semantic conventions represent the industry's best current answer to the question of how to instrument AI workloads in a way that is portable across observability backends. What they cover and what they leave to vendor implementations or custom instrumentation is directly relevant to teams planning the instrumentation of agentic systems.<sup>[3]</sup>
+
+The settled territory, as of v1.37, covers the LLM call span well. Provider identifiers, model names, operation types, token counts separated into input, output, reasoning, and cached buckets, latency histograms at the operation and streaming levels, and finish reasons are all standardized and stable. The specification isolates actual prompt and response text into OTel Events rather than span attributes, specifically to avoid the performance degradation that occurs when large text payloads inflate span sizes. The event approach has been contested within the working group (issue 2010) because it reduces the spatial and temporal locality of the content relative to the span, complicating backend processing, but the isolation remains the current specification.<sup>[3,4]</sup>
+
+The agentic operation names (`invoke_agent`, `invoke_workflow`, and `execute_tool`) provide a vocabulary for labeling the components of an agentic trace. Their coverage of the mechanics of non-deterministic execution, specifically the parent-child topologies that emerge from agent loops, async dispatch, and multi-agent delegation, is where the gap is most apparent. The working group acknowledges this gap explicitly in its open issues and roadmap, and the standalone repository migration to `open-telemetry/semantic-conventions-genai` was undertaken in part to accelerate the release cadence for these more contested areas without blocking on the review queues of the primary OpenTelemetry repository.<sup>[4]</sup> The full treatment of those version milestones, contributor names, and the repository migration mechanics belongs to the instrumentation chapter that follows. The relevant point here is that the conventions' incompleteness on agentic topology is a documented, acknowledged work in progress rather than an oversight.
+
+Datadog's implementation maps the standardized GenAI span attributes to its LLM Observability backend through an automatic translation layer, converting `gen_ai.provider.name` to the model provider field, `gen_ai.operation.name` to the span kind, and `gen_ai.conversation.id` to the session tracking identifier (per Datadog OTLP ingestion mapping documentation, accessed Q2 2026).<sup>[3,5]</sup> The mapping covers the settled attributes well. For non-standard attributes that do not appear in Datadog's mapping table, the platform falls back to generic span tags with a 256-character value ceiling, which truncates any extended metadata arrays or structured plan content that teams attempt to store in custom attributes. This truncation ceiling is distinct from the one-megabyte payload ceiling on the span itself: the 256-character limit applies per tag value, meaning that a JSON-encoded plan or structured subtask list stored as a generic span attribute will be cut at 256 characters regardless of the span's total payload size.
+
+## Sampling Under Fragmented Traces
+
+**The Cardinality Cliff** (the cost-compounding principle established in Chapter 3) takes on specific new dimensions in the context of agentic trace fragmentation. The fundamental challenge is that head-based sampling makes its retention decision before the trace has been assembled, which means it cannot know that the trace will be fragmented. A ten percent head-based sampling rate drops nine out of ten traces; if the orphaned spans from those dropped traces happen to carry information about a systematic failure, that information is lost before anyone can identify the pattern.<sup>[6]</sup>
+
+Tail-based sampling, which defers the retention decision until the trace is complete, faces its own problem under fragmented-trace conditions: the collector cannot know when a trace is complete if some of its spans will arrive as orphaned roots with no connection to the original trace ID. A collector waiting for a trace to close so it can apply tail-based sampling criteria will wait indefinitely for orphaned spans that will never arrive under the correct trace ID. The collector eventually times out and retains the partial trace. Whether the retained partial trace includes or excludes the most diagnostically relevant spans depends on which spans were orphaned, which is determined by the context propagation behavior of the specific tool calls in the specific session, not by any property the collector can observe.
+
+Several teams operating agentic systems in production have addressed this by combining two complementary strategies. The first is span-level sampling within sessions: retaining all spans associated with sessions that crossed a cost or latency threshold, regardless of whether the session's trace was coherent. Because sessions are identified by a session ID attribute that appears on every span in the session, the sampling policy can be keyed on session ID rather than on trace ID, ensuring that the full evidence for high-value sessions is retained even if the trace structure is fragmented. The second strategy is correlation by session ID as a first-class search operation in the observability backend, so that even when the trace structure is fragmented, the investigation workflow starts with "find all spans with this session ID" rather than "navigate the trace tree."<sup>[1]</sup>
+
+The implication for teams designing the observability architecture for an agentic system is to decouple the correlation model from the trace ID as early as possible. The trace ID is the correct correlation key for well-instrumented, coherent traces. For agentic systems where context propagation is incomplete or where cross-process boundaries are common, the session ID or a similar application-level correlation key is a more reliable basis for investigation than the trace ID alone.
+
+## The Cost Dimension of Fragmented Traces
+
+Agentic trace fragmentation is most visible as an investigation problem, but it carries a cost dimension that is equally important. The **Cardinality Cliff** interacts with the trace fragmentation problem in a way that amplifies both issues simultaneously.
+
+When context propagation fails and tool call spans become orphaned root spans, each orphaned span carries its own trace ID. A trace ID is a 128-bit random identifier, unique per trace. In a correctly propagated agentic trace, all fifty tool call spans from a complex agent session share one trace ID. In a fragmented trace where each tool call's context propagation failed, each of those fifty tool call spans carries a unique trace ID. This is not a cardinality problem in the metric sense: trace IDs are not metric tags. But the fragmentation creates a query-layer cardinality problem. An investigator searching for all spans belonging to a session cannot use the trace ID as the join key. They must use a session ID attribute, which means the session ID must have been attached to every span at instrumentation time, which is an additional instrumentation requirement that many teams have not implemented.
+
+Teams that rely on trace ID as the primary correlation key and encounter fragmented traces discover this problem under incident conditions, when the cost of not having a session ID is measured in investigation hours rather than in observability billing dollars. The indirect cost is real: each hour of incident investigation that could have been shortened by a session ID attribute represents real engineering time. The Gemini report on LLM observability architecture documents that incident resolution time for agentic systems without session-level correlation is typically three to five times longer than for equivalent systems with session-level correlation, driven entirely by the manual join operations required to reconstruct fragmented evidence.<sup>[1]</sup>
+
+The span volume dimension of cost is also relevant. An agentic system that generates forty to seventy spans per user interaction, at a span indexing cost of $1.70 per million indexed spans per month in standard Datadog APM pricing (per Datadog APM Billing documentation, accessed Q2 2026), accumulates cost quickly at production scale. A system handling 10,000 user sessions per day at fifty spans per session generates 500,000 spans per day, or fifteen million indexed spans per month, producing approximately $25 per month in span indexing costs at the base rate. That number is not alarming. The problem arises when the fragmented trace structure leads teams to over-index as a compensation strategy: because the trace viewer cannot render the full session picture, engineers add more span attributes, more log events, and richer metadata to each individual span in the hope that the individual span's content will be self-explanatory without reference to adjacent spans.<sup>[6,7]</sup>
+
+This over-instrumentation pattern, a predictable response to trace fragmentation, drives both cardinality and volume. Each additional span attribute is a potential dimension in the Cardinality Cliff calculation. Each additional log event attached to a span increases the event payload size and, where the backend bills by event count or event volume, the log cost. The correct response to trace fragmentation is to fix the context propagation, not to compensate for it by making individual spans more verbose. But platform teams frequently encounter the over-instrumentation pattern before the root cause is diagnosed, and rolling back excess instrumentation requires a separate sprint after the fragmentation has been fixed.
+
+## High-Cardinality Agentic Attributes
+
+One specific version of the over-instrumentation problem deserves particular attention because it is easy to introduce and difficult to notice until the billing statement arrives. Agentic systems naturally produce span attributes that are semantically valuable but structurally dangerous as metric dimensions: the session ID, the conversation ID, the task description, and the agent instance identifier.
+
+These four attributes describe the agentic context precisely. A session ID connects all spans in a user session. A conversation ID connects all spans in a conversation thread. A task description explains what the agent was attempting. An agent instance identifier distinguishes spans produced by different agents in a multi-agent system. All four are legitimate observability attributes. None of them should be used as a custom metric dimension.
+
+The session ID is high-cardinality by definition: every distinct user session has a unique session ID. Used as a span attribute, it enables the session-level join that fragmented traces require. Used as a metric tag, it creates one custom metric time series per session, which at 10,000 sessions per day produces 10,000 new time series daily, and roughly 3.65 million time series over a year of operation before any time series expire. The billing consequence of that cardinality multiplication, at $0.05 per time series per month (per Datadog custom metrics documentation, accessed Q2 2026), is severe.<sup>[7]</sup>
+
+The task description is worse. Task descriptions are natural-language strings with effectively infinite cardinality. A team that instruments a metric with a task description tag for debugging purposes and leaves that instrumentation in production has created an unbounded time series generator. The Cardinality Cliff is reached immediately, because the first new task description that appears creates a new time series, and task descriptions are unique almost by definition.
+
+The practical discipline is straightforward in statement and difficult in enforcement: high-cardinality identifiers like session IDs and task descriptions belong in span attributes and log fields, not in metric dimensions. A span attribute can be queried by value. A log field can be searched by content. Neither creates a new billable entity per unique value. A metric dimension creates one billable time series per unique value combination, for as long as the metric exists. The instrumentation reviewer's job is to identify the point at which a span attribute that was added for search and correlation purposes has been inadvertently promoted to a metric tag. This promotion typically happens when a developer, unfamiliar with the distinction between span attributes and metric tags in the observability platform's data model, adds the attribute to a metric configuration because it would be useful to filter the metric by session. The intent is legitimate. The structural consequence is a cardinality explosion.
+
+## Diagnostic Signatures in Production Trace Stores
+
+The failure patterns described above produce three observable sub-patterns in production trace stores, each with its own diagnostic signature. Naming them provides a vocabulary for the conversations between platform engineers and the teams that operate agentic systems.
+
+The orphan cluster is a set of tool call spans that share a wall-clock time window and a semantic domain (the same tool names, the same parameter patterns) but carry distinct trace IDs with no parent spans referencing the expected parent agent. It is the most direct diagnostic signature of the async dispatch orphan pattern. When an on-call engineer encounters an orphan cluster, the first question is whether the framework's context propagation configuration covers the specific dispatch mechanism in use. In most cases, a short code search for the tool dispatch call reveals whether the instrumentation explicitly captures and restores context or implicitly relies on a propagation mechanism that was not configured for this execution path.
+
+The remediation is typically a one-line change at the dispatch site: capture the current span context before dispatching, and restore it at the start of the callback. Some frameworks provide a utility function for this; others require explicit use of the OpenTelemetry context API (as shown in the code fragment earlier in this chapter). The change is low-risk, requires no infrastructure modification, and produces immediate results: after deployment, the previously orphaned tool spans begin appearing as correctly nested children of the agent span that dispatched them.<sup>[5]</sup>
+
+The depth explosion is a trace containing significantly more depth levels than the agent architecture's design would suggest, typically occurring when each iteration of a reflection-and-retry loop creates a new level of nesting rather than a sibling span under a shared loop span. In extreme cases, the depth can reach thirty or forty levels for a loop that ran ten iterations, because each iteration added three or four framework bookkeeping spans beneath the previous iteration's spans.
+
+Depth explosions do not cause correctness problems: the spans are correctly linked and the evidence is complete. They cause usability problems. Most trace visualization tools are designed for traces with depths of five to ten levels, and render deeply nested traces as a collapsed waterfall that requires many expand operations to navigate. An engineer investigating a 40-level trace under incident conditions is working against both the clock and the UI. The remediation is architectural: explicitly model the loop as a parent span that covers the entire loop duration, with each iteration creating sibling spans under that parent rather than nested spans beneath the previous iteration. This requires the application code to manage the loop span explicitly rather than relying on automatic span creation from the framework.
+
+The broken chain is a trace that appears internally complete (all spans have valid parents within the trace) but has no connection to the trace that triggered the agent invocation. Unlike the orphan cluster, which is visible as a set of root spans in the backend, the broken chain is invisible at the individual trace level. Each trace looks complete. The gap only becomes apparent when an engineer tries to follow the execution path backward from a sub-agent's trace to the parent agent that assigned it the task.
+
+Addressing the broken chain requires changes to the message contract between the parent agent and the sub-agent. The message schema must include a field for trace context. Both the producer and the consumer must be updated simultaneously. For systems where the producer and consumer are owned by different teams, this requires coordination and a deployment window. Teams that have deferred this work often do so because the gap is invisible during normal operation: users experience correct behavior, and the investigation burden falls only on the on-call engineers who encounter failures. The gap's cost is denominated in incident response time, not in user-visible errors, which makes it systematically underweighted in prioritization decisions until a high-severity incident makes it concrete.<sup>[1]</sup>
+
+## The Incomplete Evidence Problem
+
+The three diagnostic signatures above, combined with the strategy planning gap, produce a class of incident that is qualitatively different from the incidents that traditional distributed tracing was designed to support. In a traditional microservices incident, the question is: which service failed, and what did it do? The trace answers this directly. The evidence is complete, correctly linked, and navigable in a standard trace viewer.
+
+In an agentic incident, the question is: what did the agent decide, and why? The trace may contain all of the spans for all of the LLM calls and tool invocations. But the agent's decisions are recorded as the outputs of LLM calls, not as first-class span attributes. The reasoning that produced a bad planning choice, a wrong tool selection, or a failure to recognize that a subtask had failed is present as text in an LLM response event. Finding it requires reading through the event content of specific spans, which is a different investigative discipline from following span relationships in a waterfall.
+
+The **Three-Pillar Strain** (the structural mismatch established in Chapter 1) includes this specific failure of the trace model to represent agent reasoning as a queryable artifact. The gap is not about missing spans. It is about missing semantics: the trace records what operations were performed, but does not record what the agent intended to do, whether the agent's plan was reasonable, or whether the agent correctly interpreted the results it received. These are evaluation questions, and they sit on the other side of the boundary between operational and evaluation signal. The point for this chapter is that the Span Topology Problem and the fragmentation patterns above are not primarily about trace completeness. They are about the gap between the trace as a record of operations and the trace as an account of agent behavior.<sup>[4]</sup>
+
+The engineering discipline that addresses this gap is not a single tooling change. It is a sustained commitment to treating agent reasoning as an observable artifact, not merely as the content of LLM spans. That means explicitly recording planning decisions as structured span attributes, propagating context aggressively across every dispatch boundary regardless of the framework's defaults, and designing the session ID as the primary correlation key for investigations that span multiple traces. It means building the investigative workflow before the incident, not during it.
+
+The logistics engineer who spent four hours on a five-minute problem in February 2025 had all of the evidence. The evidence was just not where the workflow expected it to be.
+
+## What Instrumentation Discipline Looks Like
+
+Teams that have built coherent trace coverage for agentic systems have done so by treating context propagation as a protocol requirement rather than an instrumentation detail. The distinction matters because instrumentation details are addressed after the system is built, while protocol requirements are embedded in the system's design before the first line of application code is written.<sup>[1]</sup>
+
+Concretely, this means three practices applied at the design stage. The first is defining a session ID scheme before writing the first agent span. The session ID must be generated at the outermost boundary of the user interaction, propagated through every internal dispatch as an explicit attribute, and attached to every span, log event, and metric emitted by every component of the system. The session ID is not optional metadata. It is the primary correlation key for any investigation that spans more than one trace.
+
+The second practice is writing the context propagation contract for every agent-to-agent message format before implementing the messages. If the system uses a structured message format such as JSON for task assignment, the format should include a `trace_context` field as a required field, not an optional one. Optional trace context fields are omitted when the developer is under time pressure or working from a code template that predates the context propagation requirement. Required fields produce validation errors during testing, which surfaces the omission before the system reaches production.
+
+The third practice is running a **trace coherence test** as part of the CI pipeline. A trace coherence test instruments the agent system with a test harness that submits a known workload, collects the spans produced, and verifies that all spans for each test session share a session ID, that no spans appear as orphaned roots without an expected parent, and that the session's root span carries the expected depth and span count. This test does not verify the agent's output quality. It verifies that the evidence the on-call engineer will need during a future incident is being produced correctly in the current deployment.
+
+These three practices do not require specialized tooling. They require engineering judgment about what the investigation workflow will need and commitment to building the instrumentation infrastructure before the first production failure makes it urgent. Most teams build that infrastructure after the first production failure. The cost of building it reactively, measured in investigation hours, is reliably higher than the cost of building it proactively, measured in engineering hours.
+
+The Gemini report on LLM observability architecture documents that teams with mature agentic instrumentation (defined as session-level correlation, explicit context propagation contracts, and structured plan attributes) resolve agentic incidents in an average of twenty to thirty minutes, compared to two to five hours for teams without those practices.<sup>[1]</sup> The difference is not in the quality of the underlying observability platform. It is in the completeness of the evidence the platform is asked to store and the quality of the tooling the investigation workflow uses to navigate that evidence.
+
+When the system works as designed, a trace is a precise mechanical account of what a distributed system did. When the system is an agent, a trace is, at best, a partial record of what the agent did, and a very impoverished account of why.
+
+## Key Points
+
+- The four canonical failure patterns (orphaned async dispatch, closed-parent span, cross-process gap, re-entry loop) require prevention at design time, not retrofitting.
+- A session ID generated at the outermost boundary and propagated through every dispatch is the primary mitigation for the **Span Topology Problem**.
+- OTel GenAI v1.37 provides LLM call operation names; the strategy planning attributes that connect one LLM decision to the next are not yet standardized.
+- A CI trace coherence test verifying shared session IDs and no orphaned root spans catches propagation failures before production.
+- Teams with session-level correlation and explicit propagation contracts resolve agentic incidents in twenty to thirty minutes; teams without them take two to five hours.
