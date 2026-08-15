@@ -45,11 +45,16 @@ Each chapter introduces one to three named concepts as cognitive handles: **The 
 
 Chapters are designed to be read sequentially but can be consulted individually. `CONCEPTS.md` collects the named concepts introduced in each chapter.
 
+## Download
+
+- [**PDF**](https://github.com/vkorost/state-of-ai-observability-2026/releases/latest/download/state-of-ai-observability-2026.pdf) - for offline reading and print.
+- [**EPUB**](https://github.com/vkorost/state-of-ai-observability-2026/releases/latest/download/state-of-ai-observability-2026.epub) - for e-readers.
+
+Both are attached to the [latest release](https://github.com/vkorost/state-of-ai-observability-2026/releases/latest) and always point at the current revision. The book is corrected in place rather than re-versioned, so these links never go stale.
+
 ## What's in this repo
 
 - `README.md`: this file.
-- [`book/state-of-ai-observability-2026.pdf`](./book/state-of-ai-observability-2026.pdf): PDF for offline reading and print.
-- [`book/state-of-ai-observability-2026.epub`](./book/state-of-ai-observability-2026.epub): EPUB for e-readers.
 - [`book/chapters/`](./book/chapters/): the 12 chapters as individual Markdown files, plus front matter, "How This Book Was Written," and Appendix G (endnotes).
 - [`book/CONCEPTS.md`](./book/CONCEPTS.md): the named concepts introduced in each chapter.
 - [`book/BIBLIOGRAPHY.md`](./book/BIBLIOGRAPHY.md): further reading organized by rate of change (stable, medium-cadence, fast-moving).
@@ -78,4 +83,4 @@ Prose is released under [Creative Commons Attribution 4.0 International (CC BY 4
 
 ---
 
-[![The State of AI Observability Q2 2026 cover](./book/state-of-ai-observability-cover.jpg)](./book/state-of-ai-observability-2026.pdf)
+[![The State of AI Observability Q2 2026 cover](./book/state-of-ai-observability-cover.jpg)](https://github.com/vkorost/state-of-ai-observability-2026/releases/latest/download/state-of-ai-observability-2026.pdf)
