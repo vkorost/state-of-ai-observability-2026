@@ -1,4 +1,4 @@
-![The State of AI Observability: Q2 2026](./book/state-of-ai-observability-2026-social-800x400.jpg)
+[![The State of AI Observability: Q2 2026](./book/state-of-ai-observability-2026-social-800x400.jpg)](https://github.com/vkorost/state-of-ai-observability-2026/releases/latest)
 
 # The State of AI Observability: Q2 2026
 
