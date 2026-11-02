@@ -1,3 +1,5 @@
+![The State of AI Observability: Q2 2026](./book/state-of-ai-observability-2026-social-800x400.jpg)
+
 # The State of AI Observability: Q2 2026
 
 A snapshot of production AI observability as it stood in Q2 2026: what the three-pillar model does not see, what breaks when you trace non-deterministic systems, how much it costs, and what happens when the monitoring system is itself an AI. 12 chapters, 96,000 words, 171 endnotes drawn from Datadog documentation, DASH talk recordings, independent cost analyses, incident retrospectives, and OpenTelemetry specifications.
